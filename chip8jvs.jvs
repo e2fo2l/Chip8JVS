@@ -1,0 +1,410 @@
+//  ___ _  _ ___ ___ ___    ___   _____ 
+// / __| || |_ _| _ ( _ )_ | \ \ / / __|
+//| (__| __ || ||  _/ _ \ || |\ V /\__ \
+// \___|_||_|___|_| \___/\__/  \_/ |___/
+//Copyright (c) 2017-2018 Efflam O.
+//All rights reserved.
+//
+//This work is licensed under the terms of the MIT license.
+//For a copy, see <https://opensource.org/licenses/MIT>.
+import java.io.*;
+import javax.swing.JFileChooser;
+import javax.swing.JFrame;
+import javax.swing.JPanel;
+import java.awt.event.KeyEvent;
+import java.awt.event.KeyListener;
+import java.awt.event.WindowEvent;
+import java.awt.Toolkit;
+
+char[] stack;
+
+char indexRegistre;
+char opcode;
+char compteurOrdinal;
+char stackPointer;
+
+byte[] ecran;
+byte[] keypad;
+byte[] memoire;
+byte[] registres;
+
+byte timerDelay;
+byte timerSound;
+
+int couleurPixel = 0xFFFFFF;
+int couleurFond  = 0x000000;
+
+boolean drawFlag;
+
+char[] police = {	
+	0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+	0x20, 0x60, 0x20, 0x20, 0x70, // 1
+	0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+	0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+	0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+	0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+	0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+	0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+	0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+	0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+	0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+	0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+	0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+	0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+	0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+	0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+};
+
+int initialiserCHIP8(File fichier) {
+	memoire   = new byte[4096]; //Mémoire de la console
+	registres = new byte[16]; //Variables accessibles par la console
+	ecran     = new byte[64 * 32]; //Pixels de l'écran
+	keypad    = new byte[16]; //Touches de la console
+	stack     = new char[16]; //Stocke des informations pour les sous-opérations
+	
+	compteurOrdinal = 0x200; //Le programme commence à 0x200 dans la mémoire
+	opcode          = 0; //L'opcode (code d'instructions) est nul au départ
+	indexRegistre   = 0; //Permet au programme d'acceder à la mémoire
+	stackPointer    = 0; //Permet au programme d'utiliser des sous-opérations
+
+	timerDelay = 0; //Délai du programme nul au départ
+	timerSound = 0; //Délai du son nul au départ
+	drawFlag   = true; //Indique à la console qu'il faut rafraîchir l'écran (on ne le fait pas à chaque cycle)
+
+	for(int i = 0; i < 80; i++)
+		memoire[i] = (byte)police[i]; //On stocke la police dans la mémoire
+	
+	try{
+		InputStream input = new BufferedInputStream(new FileInputStream(fichier));
+		byte[] ROM = new byte[(int)fichier.length()];
+		input.read(ROM, 0, (int)fichier.length());
+		input.close(); //On lit intégralement le fichier ROM
+		for(int i = 0; i < ROM.length; i++)
+			memoire[i + 0x200] = ROM[i]; //On le stocke intégralement dans la mémoire, en démarrant à 0x200
+	}
+	catch(Exception e){
+		println("Erreur lors de l'ouverture du fichier!");
+		println(e);
+		return -1;
+	}
+	return 0;
+}
+
+char recupererOpcode(){
+	//Les opcodes sont constitués de 2 octets, on combine donc les 2 octets pour récupérer l'opcode
+	return (char)((memoire[compteurOrdinal] & 0xFF) << 8 | (memoire[compteurOrdinal + 1] & 0xFF));
+}
+
+void decoderOpcode(){
+	switch(opcode & 0xF000){
+		case 0x0000:
+		switch(opcode & 0x00FF){
+			case 0x00E0: //0x00E0: Effacer l'écran
+			for(int i = 0; i < 64 * 32; i++)
+				ecran[i] = 0;
+			drawFlag = true;
+			compteurOrdinal += 2;
+			break;
+
+			case 0x00EE: //0x00EE: Renvoie d'une sous-opration
+			stackPointer--;
+			compteurOrdinal = stack[stackPointer];
+			compteurOrdinal += 2;
+			break;	
+
+		}
+		break;
+		case 0x1000: //0x1NNN: Aller à l'adresse NNN
+		compteurOrdinal = (char)(opcode & 0x0FFF);
+		break;
+		case 0x2000: //0x2NNN: Appeler sous-opération  NNN
+		stack[stackPointer] = compteurOrdinal;
+		stackPointer++;
+		compteurOrdinal = (char)(opcode & 0x0FFF);
+		break;
+		case 0x3000: //0x3XNN: Sauter l'instruction si X == NN
+		if((registres[(opcode & 0x0F00) >> 8] & 0xFF) == (opcode & 0x00FF))
+			compteurOrdinal += 4;
+		else
+			compteurOrdinal += 2;
+		break;
+		case 0x4000: //0x4XNN: Sauter l'instruction si X != NN
+		if((registres[(opcode & 0x0F00) >> 8] & 0xFF) != (opcode & 0x00FF))
+			compteurOrdinal += 4;
+		else
+			compteurOrdinal += 2;
+		break;
+		case 0x5000: //0x5XY0: Sauter l'instruction si X == Y
+		if(registres[(opcode & 0x0F00) >> 8] == registres[(opcode & 0x00F0) >> 4])
+			compteurOrdinal += 4;
+		else
+			compteurOrdinal += 2;
+		break;
+		case 0x6000: //0x6XNN: Affecte NN à X
+		registres[(opcode & 0x0F00) >> 8] = (byte)(opcode & 0x00FF);
+		compteurOrdinal += 2;
+		break;
+		case 0x7000: //0x6XNN: Ajoute NN à X
+		registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) + opcode & 0x00FF);
+		compteurOrdinal += 2;
+		break;
+		case 0x8000:
+		switch(opcode & 0xF00F){
+			case 0x8000: //0x8XY0: Affecte Y à X
+			registres[(opcode & 0x0F00) >> 8] = registres[(opcode & 0x00F0) >> 4];
+			compteurOrdinal += 2;
+			break;
+			case 0x8001: //0x8XY1: Affecte Y ou X à X (Bitwise OR)
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) | (registres[(opcode & 0x00F0) >> 4] & 0xFF));
+			compteurOrdinal += 2;
+			break;
+			case 0x8002: //0x8XY2: Affecte X et Y à X (Bitwise AND)
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) & (registres[(opcode & 0x00F0) >> 4] & 0xFF));
+			compteurOrdinal += 2;
+			break;
+			case 0x8003: //0x8XY3: Affecte X ou exclus Y à X (Bitwise XOR)
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) ^ (registres[(opcode & 0x00F0) >> 4] & 0xFF));
+			compteurOrdinal += 2;
+			break;
+			case 0x8004: //0x8XY4: Affecte X + Y à X
+			if((registres[(opcode & 0x00F0) >> 4] & 0xFF) > (0xFF - (registres[(opcode & 0x0F00) >> 8] & 0xFF)))
+				registres[0xF] = 1;
+			else
+				registres[0xF] = 0;
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) + (registres[(opcode & 0x00F0) >> 4] & 0xFF));
+			compteurOrdinal += 2;
+			break;
+			case 0x8005: //0x8XY5: Affecte X - Y à X
+			if ((registres[(opcode & 0x00F0) >> 4] & 0xFF) > (registres[(opcode & 0x0F00) >> 8] & 0xFF))
+				registres[0xF] = 0;
+			else
+				registres[0xF] = 1;
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) - (registres[(opcode & 0x00F0) >> 4] & 0xFF));
+			compteurOrdinal += 2;
+			break;
+			case 0x8006: //0x8XY6: Décale X de 1 bit à droite
+			registres[0xF] = (byte)(registres[(opcode & 0x0F00) >> 8] & 0x1);
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) >> 1);
+			compteurOrdinal += 2;
+			break;
+			case 0x8007: //0x8XY7: Affecte Y - X à X
+			if ((registres[(opcode & 0x0F00) >> 8] & 0xFF) > (registres[(opcode & 0x00F0) >> 4] & 0xFF))
+				registres[0xF] = 0;
+			else
+				registres[0xF] = 1;
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x00F0) >> 4] & 0xFF) - (registres[(opcode & 0x0F00) >> 8]) & 0xFF);
+			compteurOrdinal += 2;
+			break;
+			case 0x800E: //0x8XYE: Décale X de 1 bit à gauche
+			registres[0xF] = (byte)(registres[(opcode & 0x0F00) >> 8] >> 7);
+			registres[(opcode & 0x0F00) >> 8] = (byte)((registres[(opcode & 0x0F00) >> 8] & 0xFF) << 1);
+			compteurOrdinal += 2;
+			break;
+		}
+		break;
+		case 0x9000: //0x9XY0: Saute l'instruction si X != Y
+		if(registres[(opcode & 0x0F00) >> 8] != registres[(opcode & 0x00F0) >> 4])
+			compteurOrdinal += 4;
+		else
+			compteurOrdinal += 2;
+		break;
+		case 0xA000: //0xANNN: Met l'index de registre à NNN
+		indexRegistre = (char)(opcode & 0x0FFF);
+		compteurOrdinal += 2;
+		break;
+		case 0xB000: //0xBNNN: Met le compteur ordinal à NNN + registres[0]
+		compteurOrdinal = (char)((opcode & 0x0FFF) + registres[0]);
+		break;
+		case 0xC000: //0xCXNN: Affecte à X une valeur aléartoire dépendant de NN
+		registres[(opcode & 0x0F00) >> 8] = (byte)(random(0x00, 0xFF) & (opcode & 0x00FF));
+		compteurOrdinal += 2;
+		break;
+		case 0xD000: //0xDXYN: Dessine un sprite aux coordonnées X et Y, qui a une largeur de 8 et une hauteur de N
+		int x = (registres[(opcode & 0x0F00) >> 8] & 0xFF);
+		int y = (registres[(opcode & 0x00F0) >> 4] & 0xFF);
+		int hauteur = opcode & 0x000F;
+		registres[0xF] = 0;
+		for(int i = 0; i < hauteur; i++){
+			char pixel = (char)(memoire[indexRegistre + i] & 0xFF);
+			for(int j = 0; j < 8; j++){
+				if((pixel & (0x80 >> j)) != 0){
+					if(ecran[(y + i) * 64 + x + j] == 1)
+						registres[0xF] = 1;
+					ecran[(y + i) * 64 + x + j] ^= 1;
+				}
+			}
+		}
+		drawFlag = true;
+		compteurOrdinal += 2;
+		break;
+		case 0xE000:
+		switch(opcode & 0xF0FF){
+			case 0xE09E: //0xEX9E: Saute la prochaine instruction si la touche X est pressée
+			if(keypad[registres[(opcode & 0x0F00) >> 8] & 0xFF] != 0)
+				compteurOrdinal += 4;
+			else
+				compteurOrdinal += 2;
+			break;
+			case 0xE0A1: //0xEXA1: Saute la prochaine instruction si la touche X n'est pas pressée
+			if(keypad[registres[(opcode & 0x0F00) >> 8] & 0xFF] == 0)
+				compteurOrdinal += 4;
+			else
+				compteurOrdinal += 2;
+			break;
+		}
+		break;
+		case 0xF000:
+		switch(opcode & 0xF0FF){
+			case 0xF007: //0xFX07: Affecte le timer "delay" à X
+			registres[(opcode & 0x0F00) >> 8] = timerDelay;
+			compteurOrdinal += 2;
+			break;
+			case 0xF00A: //0xFX0A: Attend qu'une touche soit pressée, puis la stocke dans X
+			boolean touchePressee = false;
+			do{
+				for(byte i = 0; i <= 0xF; i++){
+					if(keypad[i] != 0){
+						registres[(opcode & 0x0F00) >> 8] = i;
+						touchePressee = true;
+					}
+				}
+			}while(!touchePressee);
+			compteurOrdinal += 2;
+			break;
+			case 0xF015: //0xFX15: Affecte X au timer "delay"
+			timerDelay = registres[(opcode & 0x0F00) >> 8];
+			compteurOrdinal += 2;
+			break;
+			case 0xF018: //0xFX18: Affecte X au timer "sound"
+			timerSound = registres[(opcode & 0x0F00) >> 8];
+			compteurOrdinal += 2;
+			break;
+			case 0xF01E: //0xF01E: Ajoute X à l'index de registre
+			if(indexRegistre + (registres[(opcode & 0x0F00) >> 8] & 0xFF) > 0xFFF)
+				registres[0xF] = 1; //Fonctionnalité non documentée
+			else
+				registres[0xF] = 0;
+			indexRegistre += (registres[(opcode & 0x0F00) >> 8] & 0xFF);
+			compteurOrdinal += 2;
+			break;
+			case 0xF029: //0xFX29: Met l'index de registre à la location du sprite pour le caractère de X
+			indexRegistre = (char)((registres[(opcode & 0x0F00) >> 8] & 0xFF) * 0x5);
+			compteurOrdinal += 2;
+			break;
+			case 0xF033: //0xFX33: Stocke la représentation décimale de X dans la mémoire
+			memoire[indexRegistre]     = (byte) ((registres[(opcode & 0x0F00) >> 8] & 0xFF) / 100);
+			memoire[indexRegistre + 1] = (byte)(((registres[(opcode & 0x0F00) >> 8] & 0xFF) / 10) % 10);
+			memoire[indexRegistre + 2] = (byte)(((registres[(opcode & 0x0F00) >> 8] & 0xFF) % 100) % 10);
+			compteurOrdinal += 2;
+			break;
+			case 0xF055: //0xFX55: Stocke dans la mémoire les registres de 0 à X
+			for(int i = 0; i <= ((opcode & 0x0F00) >> 8); i++)
+				memoire[indexRegistre + i] = registres[i];
+			indexRegistre += ((opcode & 0x0F00) >> 8) + 1;
+			compteurOrdinal += 2;
+			break;
+			case 0xF065: //0xFX65: Stocke dans les registres de 0 à X la mémoire
+			for(int i = 0; i <= ((opcode & 0x0F00) >> 8); i++)
+				registres[i] = memoire[indexRegistre + i];
+			indexRegistre += ((opcode & 0x0F00) >> 8) + 1;
+			compteurOrdinal += 2;
+			break;
+		}
+		break;
+	}
+}
+
+void actualiserTimers(){
+	if(timerDelay > 0) //A chaque cycle, on décrémente le timer si il est non nul
+		--timerDelay;
+	if(timerSound > 0){ //A chaque cycle, on décrémente le timer pour le son si il est non nul
+		if(timerSound == 1)//Si le timer pour le son est égal à 1, on produit un son.
+			Toolkit.getDefaultToolkit().beep(); //Produit un son de "Bip"
+		--timerSound;
+	}
+}
+
+void cycleEmulation(){
+	opcode = recupererOpcode(); //On récupère l'opcode
+	decoderOpcode(); //On le traite
+	actualiserTimers(); //On rafraîchit les timers
+}
+
+void dessinerGraphiques(){
+	//On parcourt entièrement le tableau "écran". Si une valeur est à 1, on allume le pixel correspondant, sinon, on l'éteint.
+	for(int i = 0; i < 32; i++)
+		for(int j = 0; j < 64; j++)
+			if(ecran[i * 64 + j] != 0)
+				setPixel(j, i, (couleurPixel & 0xFF0000) >> 16, (couleurPixel & 0x00FF00) >> 8, couleurPixel & 0x0000FF); //On décode la couleur des pixels
+			else
+				setPixel(j, i, (couleurFond  & 0xFF0000) >> 16, (couleurFond  & 0x00FF00) >> 8, couleurFond  & 0x0000FF); //On décode la couleur du fond
+	drawFlag = false;
+}
+
+public class KeyboardExample extends JPanel{ //Bibliothèque permettant de récupérer les touches
+	
+	public KeyboardExample() {
+		KeyListener listener = new MyKeyListener();
+		addKeyListener(listener);
+		setFocusable(true);
+	}
+
+	public class MyKeyListener implements KeyListener {
+		@Override
+		public void keyTyped(KeyEvent e) {
+		}
+
+		@Override
+		public void keyPressed(KeyEvent e) {
+			String touches = "X123AZEQSDWC4RFV";
+			int ind = touches.indexOf(KeyEvent.getKeyText(e.getKeyCode()));
+			//Si une touche est pressée, on l'actualise.
+			if(ind != -1)
+				keypad[ind] = 1;
+		}
+
+		@Override
+		public void keyReleased(KeyEvent e) {
+			String touches = "X123AZEQSDWC4RFV";
+			int ind = touches.indexOf(KeyEvent.getKeyText(e.getKeyCode()));
+			//Si une touche est relâchée, on l'actualise.
+			if(ind != -1)
+				keypad[ind] = 0;
+		}
+	}
+}
+void main() {
+	reset(64, 32, false); //Coordonnées non centrées
+	JFileChooser chooser = new JFileChooser(new File(".")); //On choisit le fichier
+	if(chooser.showOpenDialog(null) != JFileChooser.APPROVE_OPTION) return; //On quitte si aucun fichier n'a été choisi
+	if(initialiserCHIP8(chooser.getSelectedFile()) != 0) return; //On quitte si il y a eu une erreur lors de la lecteur du fichier
+	JFrame frame = new JFrame("KeyListener: Ne pas toucher!"); //On crée une fenêtre pour récupérer les touches
+	KeyboardExample keyboardExample = new KeyboardExample(); //On crée un récepteur de touches de clavier
+	frame.add(keyboardExample);  //On l'assigne à la fenêtre
+	frame.setSize(1, 1); //On lui met la taille minimum
+	frame.setVisible(true); //On la rend visible
+	double depart = now(); //Compteur permettant de savoir le temps écoulé entre 2 cycles 
+	double arrivee = now(); //Pareil
+	for(;true;){ //Boucle infinie (On utilise for pour retirer le chrono de la boucle while)
+		try{
+		cycleEmulation(); //On effectue le cycle d'émulation
+		arrivee = now(); //On met à jour les compteurs
+		if((arrivee - depart) < 16)
+			sleep(16 - (int)(arrivee - depart)); //On bloque l'émulateur à 60 cycles maximum par seconde.
+		depart = arrivee;
+		if(drawFlag){
+			dessinerGraphiques(); //Si le "draw flag" est activé, on rafraîchit l'écran
+		}}
+		catch(Exception e){ //Si une exception est détectée, on affiche les variables de la console.
+			println("Oups! Un crash a été détecté!\nRegistres:");
+			for(int i = 0; i < 0x10; i++)
+				println("registres[" + i + String.format("]: 0x%02X", (registres[i] & 0xFF)));
+			println(String.format("Compteur Ordinal: 0x%04X", (int)compteurOrdinal));
+			println(String.format("Opcode: 0x%04X", (int)opcode));
+			frame.dispatchEvent(new WindowEvent(frame, WindowEvent.WINDOW_CLOSING));
+			break;
+		}
+	}
+}
+
+//くコ:彡
